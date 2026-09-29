@@ -6,6 +6,7 @@
 <meta name="theme-color" content="#000000">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>subaqueo</title>
+<link rel="icon" href="data:,">
 <style>
   :root {
     --bg: #000;
@@ -124,6 +125,8 @@
   .tr .en { font-weight: 700; }
   .tr .es { color: var(--sub); font-size: 14px; }
   .empty-note { color: var(--sub); padding: 20px 0; }
+  .diag { position: fixed; z-index: 4; left: 12px; right: 12px; top: calc(var(--safe-t) + 62px); margin: 0; padding: 8px 10px; border-radius: 10px;
+    background: rgba(30,30,34,.92); color: #9fe7d4; font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre-wrap; pointer-events: none; }
   .toast { position: fixed; z-index: 30; left: 50%; top: calc(var(--safe-t) + 64px); transform: translateX(-50%); background: var(--panel-2); padding: 10px 16px; border-radius: 14px; font-size: 14px; max-width: calc(100% - 32px); text-align: center; }
 </style>
 </head>
@@ -151,6 +154,7 @@
   </div>
 </div>
 
+<pre class="diag" id="diag" hidden></pre>
 <button class="live-pill" id="livePill" hidden>↓ Back to live</button>
 
 <footer class="dock">
@@ -177,6 +181,7 @@
       </select></div>
     <div class="row"><label>Show Spanish under each line</label><button class="switch" id="optShowEs" role="switch" aria-checked="true"></button></div>
     <div class="row"><label>Text size</label><div class="seg"><button id="sizeDown">A−</button><button id="sizeUp">A+</button></div></div>
+    <div class="row"><label>Show diagnostics<small>Live log of what the microphone is doing</small></label><button class="switch" id="optDiag" role="switch" aria-checked="false"></button></div>
     <div class="row"><label>Test translation<small>Check your connection before class</small></label><button class="btn-sm" id="btnTest">Run test</button></div>
     <div class="test-out" id="testOut"></div>
     <ul class="tips">
@@ -207,7 +212,7 @@ const LS = {
   del(k) { try { localStorage.removeItem('subaqueo.' + k); } catch {} },
 };
 
-const settings = Object.assign({ src: 'es-ES', tgt: 'en', showEs: true, size: 30 }, LS.get('settings', {}));
+const settings = Object.assign({ src: 'es-ES', tgt: 'en', showEs: true, size: 30, diag: false }, LS.get('settings', {}));
 const saveSettings = () => LS.set('settings', settings);
 
 /* ================= dom ================= */
@@ -444,61 +449,92 @@ async function runLiveTranslate() {
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const MAX_WORDS = 22;      // force a line break on long unbroken speech
 const PAUSE_MS = 1100;     // silence that ends a line
-const WATCHDOG_MS = 9000;  // no events for this long → recreate recognizer
+const STALL_MS = 25000;    // no recognizer events at all for this long → it's hung
 
 let running = false;
 let rec = null;
+let mode = 'continuous';   // falls back to 'phrase' (one utterance per recognizer) if continuous yields nothing
 let words = [];            // words heard by the current recognizer instance
 let committed = 0;         // how many of `words` are already committed as lines
 let committedText = '';    // committed text for this instance (to catch iOS duplicate replays)
-let pauseTimer = 0, watchdog = 0, restartTimer = 0, restartFails = 0;
+let heardSpeech = false, gotResult = false, bornAt = 0, silentRuns = 0;
+let pauseTimer = 0, watchdog = 0, restartTimer = 0, stopFallback = 0, restartFails = 0;
 
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
+
+/* diagnostics overlay (Settings → Show diagnostics) */
+const diagLines = [];
+const diagT0 = Date.now();
+function log(msg) {
+  diagLines.push(`${((Date.now() - diagT0) / 1000).toFixed(1).padStart(6)}  ${msg}`);
+  if (diagLines.length > 12) diagLines.shift();
+  if (settings.diag) $('diag').textContent = `mode: ${mode}\n` + diagLines.join('\n');
+}
 
 function createRecognizer() {
   const r = new SR();
   r.lang = settings.src;
-  r.continuous = true;
+  r.continuous = mode === 'continuous';
   r.interimResults = true;
   r.maxAlternatives = 1;
   r.onresult = (e) => { if (r === rec) onResult(e); };
-  r.onerror = (e) => { if (r === rec) onError(e); };
-  r.onend = () => { if (r === rec) onEnd(); };
-  r.onstart = () => { if (r === rec) { restartFails = 0; setStatus('listening'); } };
+  r.onerror = (e) => { log('error: ' + e.error); if (r === rec) onError(e); };
+  r.onend = () => { log('end'); if (r === rec) onEnd(); };
+  r.onstart = () => { log('start'); if (r === rec) { restartFails = 0; setStatus('listening'); armWatchdog(); } };
+  for (const ev of ['audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend']) {
+    r.addEventListener(ev, () => {
+      if (r !== rec) return;
+      if (ev === 'soundstart' || ev === 'speechstart') heardSpeech = true;
+      log(ev);
+      armWatchdog();
+    });
+  }
   return r;
 }
 
 function startRecognizer() {
-  clearTimeout(restartTimer);
+  clearTimeout(restartTimer); clearTimeout(stopFallback);
   if (!running) return;
   words = []; committed = 0; committedText = '';
+  heardSpeech = false; gotResult = false; bornAt = Date.now();
   rec = createRecognizer();
   try { rec.start(); }
-  catch { scheduleRestart(400); return; }
+  catch (e) { log('start failed: ' + e.message); rec = null; scheduleRestart(500); return; }
   armWatchdog();
 }
-function stopRecognizer() {
+// immediate: discards anything the recognizer hasn't delivered yet
+function killRecognizer() {
   const r = rec; rec = null;
-  clearTimeout(pauseTimer); clearTimeout(watchdog); clearTimeout(restartTimer);
+  clearTimeout(pauseTimer); clearTimeout(watchdog); clearTimeout(restartTimer); clearTimeout(stopFallback);
   if (r) { try { r.abort(); } catch {} }
+}
+// graceful: stop() lets the recognizer deliver pending results, then onEnd starts a fresh one
+function recycle() {
+  if (!rec) return startRecognizer();
+  clearTimeout(watchdog);
+  try { rec.stop(); } catch {}
+  clearTimeout(stopFallback);
+  stopFallback = setTimeout(() => { if (!running) return; flushTail(); killRecognizer(); startRecognizer(); }, 3000);
 }
 function scheduleRestart(ms) {
   clearTimeout(restartTimer);
   if (!running) return;
   setStatus('reconnecting');
-  restartTimer = setTimeout(() => { stopRecognizer(); startRecognizer(); }, ms);
+  restartTimer = setTimeout(() => { killRecognizer(); startRecognizer(); }, ms);
 }
 function armWatchdog() {
   clearTimeout(watchdog);
   watchdog = setTimeout(() => {
-    if (!running) return;
+    if (!running || !rec) return;
+    log('watchdog: recognizer silent, recycling');
     flushTail();
-    stopRecognizer(); startRecognizer();
-  }, WATCHDOG_MS);
+    recycle();
+  }, STALL_MS);
 }
 
 function onResult(e) {
   armWatchdog();
+  gotResult = true; silentRuns = 0;
   setStatus('listening');
   // rebuild this instance's full transcript, skipping parts iOS sometimes replays
   let text = '';
@@ -506,19 +542,21 @@ function onResult(e) {
   for (let i = 0; i < e.results.length; i++) {
     const part = norm(e.results[i][0].transcript);
     if (!part) continue;
-    if (text && (text.endsWith(part) || text === part)) continue;
+    if (text && part.split(' ').length >= 3 && text.endsWith(part)) continue;
     text += (text ? ' ' : '') + part;
     lastFinal = e.results[i].isFinal;
   }
   words = text ? text.split(' ') : [];
   if (committed > words.length) committed = words.length;
   let tail = words.slice(committed);
+  log(`result${lastFinal ? ' (final)' : ''}: …${tail.slice(-5).join(' ')}`);
 
   // iOS bug: the whole transcript can be replayed after speech stops
   const tailText = tail.join(' ');
   if (tail.length >= 4 && committedText.includes(tailText)) {
+    log('replay detected, restarting');
     committed = words.length; setLive('');
-    stopRecognizer(); startRecognizer();
+    killRecognizer(); startRecognizer();
     return;
   }
 
@@ -537,7 +575,7 @@ function onResult(e) {
   setLive(tail.join(' '));
 
   clearTimeout(pauseTimer);
-  if (tail.length) pauseTimer = setTimeout(flushTail, PAUSE_MS);
+  if (tail.length) pauseTimer = setTimeout(onPause, PAUSE_MS);
 }
 function commit(ws) {
   committed += ws.length;
@@ -550,8 +588,11 @@ function flushTail() {
   const tail = words.slice(committed);
   if (tail.length) commit(tail);
   setLive('');
+}
+function onPause() {
+  flushTail();
   // keep each recognizer instance short-lived: iOS gets flaky with long sessions
-  if (running && committed > 120) { stopRecognizer(); startRecognizer(); }
+  if (running && mode === 'continuous' && committed > 120) recycle();
 }
 function onError(e) {
   if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -561,14 +602,19 @@ function onError(e) {
       : 'Microphone access was denied. Allow it for this site and try again.', 6000);
     return;
   }
-  if (e.error === 'aborted') return;
+  if (e.error === 'aborted' || e.error === 'no-speech') return; // onend restarts
   restartFails++;
   scheduleRestart(e.error === 'network' ? Math.min(5000, 500 * restartFails) : 250);
 }
 function onEnd() {
   if (!running) return;
+  clearTimeout(stopFallback);
   flushTail();
-  scheduleRestart(restartFails > 3 ? 1500 : 100);
+  // continuous mode is broken on some devices: sound is heard but no words ever arrive
+  if (mode === 'continuous' && !gotResult && (heardSpeech || Date.now() - bornAt > 15000)) {
+    if (++silentRuns >= 2) { mode = 'phrase'; log('no words in continuous mode → switching to phrase mode'); }
+  }
+  scheduleRestart(restartFails > 3 ? 1500 : 50);
 }
 
 /* ================= start / stop ================= */
@@ -611,7 +657,7 @@ function stopListening() {
   if (running) elapsedBefore += Date.now() - startedAt;
   running = false;
   flushTail();
-  stopRecognizer();
+  killRecognizer();
   clearInterval(clockTimer);
   try { wakeLock && wakeLock.release(); } catch {}
   wakeLock = null;
@@ -644,10 +690,14 @@ function applySettings() {
   $('optSrc').value = settings.src;
   $('optTgt').value = settings.tgt;
   $('optShowEs').setAttribute('aria-checked', String(settings.showEs));
+  $('optDiag').setAttribute('aria-checked', String(settings.diag));
+  $('diag').hidden = !settings.diag;
+  if (settings.diag) log('diagnostics on');
 }
-$('optSrc').addEventListener('change', (e) => { settings.src = e.target.value; saveSettings(); if (running) { flushTail(); stopRecognizer(); startRecognizer(); } });
+$('optSrc').addEventListener('change', (e) => { settings.src = e.target.value; saveSettings(); if (running) { flushTail(); killRecognizer(); startRecognizer(); } });
 $('optTgt').addEventListener('change', (e) => { settings.tgt = e.target.value; saveSettings(); });
 $('optShowEs').addEventListener('click', () => { settings.showEs = !settings.showEs; saveSettings(); applySettings(); scrollToActive(false); });
+$('optDiag').addEventListener('click', () => { settings.diag = !settings.diag; saveSettings(); applySettings(); });
 $('sizeDown').addEventListener('click', () => { settings.size = Math.max(20, settings.size - 3); saveSettings(); applySettings(); scrollToActive(false); });
 $('sizeUp').addEventListener('click', () => { settings.size = Math.min(48, settings.size + 3); saveSettings(); applySettings(); scrollToActive(false); });
 $('btnTest').addEventListener('click', async () => {
