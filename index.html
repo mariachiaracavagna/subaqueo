@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>subaqueo</title>
+<style>
+  :root {
+    --bg: #000;
+    --fg: #fff;
+    --dim: rgba(255,255,255,.34);
+    --sub: rgba(255,255,255,.55);
+    --panel: #141416;
+    --panel-2: #1f1f23;
+    --line: rgba(255,255,255,.1);
+    --accent: #5ee0c1;
+    --danger: #ff5f57;
+    --size: 30px;
+    --safe-t: env(safe-area-inset-top, 0px);
+    --safe-b: env(safe-area-inset-bottom, 0px);
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overflow: hidden; }
+  body { font: 16px/1.4 -apple-system, "SF Pro Display", system-ui, "Segoe UI", Roboto, sans-serif; -webkit-font-smoothing: antialiased; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  [hidden] { display: none !important; }
+
+  /* ---------- top bar ---------- */
+  .top {
+    position: fixed; inset: 0 0 auto 0; z-index: 5;
+    padding: calc(var(--safe-t) + 10px) 18px 18px;
+    display: flex; align-items: center; gap: 10px;
+    background: linear-gradient(#000 55%, rgba(0,0,0,0));
+  }
+  .brand { font-weight: 800; letter-spacing: -.02em; font-size: 17px; }
+  .status { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--sub); font-variant-numeric: tabular-nums; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+  .listening .dot { background: var(--accent); animation: pulse 1.6s ease-in-out infinite; }
+  .reconnecting .dot { background: #f5b942; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .spacer { flex: 1; }
+  .icon-btn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; background: var(--panel-2); }
+  .icon-btn svg { width: 19px; height: 19px; }
+
+  /* ---------- lyric stage ---------- */
+  #stage {
+    position: fixed; inset: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    padding: calc(var(--safe-t) + 34vh) 22px calc(var(--safe-b) + 48vh);
+    overscroll-behavior: contain;
+  }
+  .ln { margin: 0 0 26px; opacity: var(--o, .34); transition: opacity .35s ease, transform .35s ease; transform-origin: left center; }
+  .ln .en { font-size: var(--size); font-weight: 800; line-height: 1.16; letter-spacing: -.015em; overflow-wrap: anywhere; }
+  .ln .es { font-size: calc(var(--size) * .5); font-weight: 500; color: var(--sub); margin-top: 6px; line-height: 1.3; }
+  .hide-es .ln .es { display: none; }
+  .ln.pending .en { color: rgba(255,255,255,.72); }
+  .ln.failed .en { color: rgba(255,255,255,.45); font-style: italic; }
+  .ln.active { --o: 1; }
+  .ln.near { --o: .6; }
+  .browsing .ln { --o: .82; }
+  .ln.live .es { font-style: italic; }
+  .ln.live.empty { display: none; }
+  .ln .en:empty::before { content: "…"; color: var(--dim); }
+
+  .hero { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; pointer-events: none; }
+  .hero > div { max-width: 360px; text-align: center; }
+  .hero h1 { font-size: 40px; letter-spacing: -.035em; margin: 0 0 8px; font-weight: 850; }
+  .hero p { color: var(--sub); margin: 0; }
+  .hero .warn { color: #f5b942; margin-top: 18px; font-size: 14px; }
+
+  /* ---------- bottom controls ---------- */
+  .dock {
+    position: fixed; inset: auto 0 0 0; z-index: 5;
+    padding: 28px 18px calc(var(--safe-b) + 16px);
+    display: flex; justify-content: center; align-items: center; gap: 12px;
+    background: linear-gradient(rgba(0,0,0,0), #000 45%);
+  }
+  .main-btn {
+    height: 56px; padding: 0 28px; border-radius: 28px; font-weight: 700; font-size: 17px;
+    background: var(--fg); color: #000; display: flex; align-items: center; gap: 9px;
+  }
+  .main-btn.on { background: var(--panel-2); color: var(--fg); }
+  .main-btn svg { width: 18px; height: 18px; }
+  .ghost-btn { height: 56px; padding: 0 20px; border-radius: 28px; background: var(--panel-2); font-weight: 600; }
+  .live-pill {
+    position: fixed; z-index: 6; left: 50%; transform: translateX(-50%);
+    bottom: calc(var(--safe-b) + 92px);
+    padding: 10px 16px; border-radius: 22px; background: var(--accent); color: #002a20; font-weight: 700; font-size: 14px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.5);
+  }
+
+  /* ---------- sheets ---------- */
+  .sheet-wrap { position: fixed; inset: 0; z-index: 20; background: rgba(0,0,0,.6); display: flex; align-items: flex-end; justify-content: center; }
+  .sheet {
+    width: 100%; max-width: 640px; max-height: 88vh; overflow-y: auto; background: var(--panel);
+    border-radius: 22px 22px 0 0; padding: 20px 20px calc(var(--safe-b) + 24px);
+  }
+  .sheet h2 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
+  .sheet-head { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+  .row label { font-weight: 600; }
+  .row small { display: block; color: var(--sub); font-weight: 400; font-size: 13px; }
+  select, .seg button { font: inherit; color: var(--fg); background: var(--panel-2); border: 0; border-radius: 10px; padding: 8px 10px; }
+  .seg { display: flex; gap: 6px; }
+  .seg button { min-width: 42px; font-weight: 700; }
+  .switch { width: 50px; height: 30px; border-radius: 15px; background: #3a3a3f; position: relative; flex: none; transition: background .2s; }
+  .switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 24px; height: 24px; border-radius: 50%; background: #fff; transition: transform .2s; }
+  .switch[aria-checked="true"] { background: var(--accent); }
+  .switch[aria-checked="true"]::after { transform: translateX(20px); }
+  .tips { color: var(--sub); font-size: 14px; margin: 18px 0 0; padding-left: 18px; }
+  .tips li { margin-bottom: 6px; }
+  .test-out { font-size: 13px; color: var(--sub); margin-top: 8px; min-height: 1em; }
+  .btn-sm { background: var(--panel-2); border-radius: 10px; padding: 8px 12px; font-weight: 600; font-size: 14px; }
+  .btn-sm.danger { color: var(--danger); }
+  .sess { padding: 14px 0; border-bottom: 1px solid var(--line); display: block; width: 100%; text-align: left; }
+  .sess b { display: block; }
+  .sess span { color: var(--sub); font-size: 13px; }
+  .sess p { margin: 4px 0 0; color: var(--sub); font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .tr { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .tr time { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .tr .en { font-weight: 700; }
+  .tr .es { color: var(--sub); font-size: 14px; }
+  .empty-note { color: var(--sub); padding: 20px 0; }
+  .toast { position: fixed; z-index: 30; left: 50%; top: calc(var(--safe-t) + 64px); transform: translateX(-50%); background: var(--panel-2); padding: 10px 16px; border-radius: 14px; font-size: 14px; max-width: calc(100% - 32px); text-align: center; }
+</style>
+</head>
+<body>
+
+<header class="top" id="top">
+  <span class="brand">subaqueo</span>
+  <span class="status" id="status"><span class="dot"></span><span id="statusText">Ready</span></span>
+  <span class="spacer"></span>
+  <button class="icon-btn" id="btnSessions" aria-label="Saved sessions">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+  </button>
+  <button class="icon-btn" id="btnSettings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
+</header>
+
+<main id="stage" aria-live="polite"></main>
+
+<div class="hero" id="hero">
+  <div>
+    <h1>Live subtitles</h1>
+    <p id="heroText">Spanish → English, line by line.<br>Tap <b>Start</b> and put your phone on the desk.</p>
+    <p class="warn" id="unsupported" hidden>This browser can't do speech recognition. On iPhone, open this page in <b>Safari</b> and make sure <b>Dictation</b> is enabled (Settings → General → Keyboard).</p>
+  </div>
+</div>
+
+<button class="live-pill" id="livePill" hidden>↓ Back to live</button>
+
+<footer class="dock">
+  <button class="ghost-btn" id="btnEnd" hidden>End &amp; save</button>
+  <button class="main-btn" id="btnMain">
+    <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1a7 7 0 0 0 6-6.9h-2z"/></svg>
+    <span>Start</span>
+  </button>
+</footer>
+
+<!-- settings -->
+<div class="sheet-wrap" id="settingsSheet" hidden>
+  <div class="sheet">
+    <div class="sheet-head"><h2>Settings</h2><span class="spacer"></span><button class="btn-sm" data-close>Done</button></div>
+    <div class="row"><label>Speaker's Spanish</label>
+      <select id="optSrc">
+        <option value="es-ES">Spain</option><option value="es-MX">Mexico</option><option value="es-US">US</option>
+        <option value="es-AR">Argentina</option><option value="es-CO">Colombia</option><option value="es-CL">Chile</option>
+      </select></div>
+    <div class="row"><label>Translate into</label>
+      <select id="optTgt">
+        <option value="en">English</option><option value="it">Italiano</option><option value="fr">Français</option>
+        <option value="de">Deutsch</option><option value="pt">Português</option>
+      </select></div>
+    <div class="row"><label>Show Spanish under each line</label><button class="switch" id="optShowEs" role="switch" aria-checked="true"></button></div>
+    <div class="row"><label>Text size</label><div class="seg"><button id="sizeDown">A−</button><button id="sizeUp">A+</button></div></div>
+    <div class="row"><label>Test translation<small>Check your connection before class</small></label><button class="btn-sm" id="btnTest">Run test</button></div>
+    <div class="test-out" id="testOut"></div>
+    <ul class="tips">
+      <li>Keep this page open in <b>Safari</b> and the screen on. Locking the phone stops the microphone.</li>
+      <li>Set <b>Settings → Display → Auto-Lock → Never</b> during class, as a backup.</li>
+      <li>To stop Safari asking for the microphone every time: <b>aA</b> in the address bar → Website Settings → Microphone → Allow.</li>
+      <li>Every line is saved as you go. Find past classes under the ≡ menu.</li>
+    </ul>
+  </div>
+</div>
+
+<!-- sessions -->
+<div class="sheet-wrap" id="sessionsSheet" hidden>
+  <div class="sheet">
+    <div class="sheet-head"><h2 id="sessTitle">Sessions</h2><span class="spacer"></span><button class="btn-sm" id="sessBack" hidden>Back</button><button class="btn-sm" data-close>Close</button></div>
+    <div id="sessBody"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+
+/* ================= storage ================= */
+const LS = {
+  get(k, d) { try { const v = localStorage.getItem('subaqueo.' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('subaqueo.' + k, JSON.stringify(v)); return true; } catch { return false; } },
+  del(k) { try { localStorage.removeItem('subaqueo.' + k); } catch {} },
+};
+
+const settings = Object.assign({ src: 'es-ES', tgt: 'en', showEs: true, size: 30 }, LS.get('settings', {}));
+const saveSettings = () => LS.set('settings', settings);
+
+/* ================= dom ================= */
+const $ = (id) => document.getElementById(id);
+const stage = $('stage'), hero = $('hero'), top = $('top');
+const statusText = $('statusText'), btnMain = $('btnMain'), btnEnd = $('btnEnd'), livePill = $('livePill');
+
+function toast(msg, ms = 2600) {
+  const t = document.createElement('div');
+  t.className = 'toast'; t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), ms);
+}
+
+/* ================= translation (free providers with failover) ================= */
+const decodeEntities = (s) => { const t = document.createElement('textarea'); t.innerHTML = s; return t.value; };
+
+const PROVIDERS = [
+  { name: 'Google (Chrome)', async run(q, sl, tl, signal) {
+      const r = await fetch('https://translate-pa.googleapis.com/v1/translateHtml', {
+        method: 'POST', signal,
+        headers: { 'Content-Type': 'application/json+protobuf', 'X-Goog-API-Key': 'AIzaSyATBXajvzQLTDHEQbcpq0Ihe0vWDHmO520' },
+        body: JSON.stringify([[[q], sl, tl], 'te']),
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      return decodeEntities(j[0][0]);
+  } },
+  { name: 'Google (clients5)', async run(q, sl, tl, signal) {
+      const r = await fetch(`https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl=${sl}&tl=${tl}&q=${encodeURIComponent(q)}`, { signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      const first = j[0];
+      return Array.isArray(first) ? first[0] : first;
+  } },
+  { name: 'Google (googleapis)', async run(q, sl, tl, signal) {
+      const r = await fetch(`https://translate.googleapis.com/translate_a/single?client=dict-chrome-ex&sl=${sl}&tl=${tl}&dt=t&q=${encodeURIComponent(q)}`, { signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      return j[0].map((s) => s[0]).join('');
+  } },
+  { name: 'MyMemory', async run(q, sl, tl, signal) {
+      const r = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(q)}&langpair=${sl}|${tl}`, { signal });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      if (j.responseStatus != 200 || j.quotaFinished) throw new Error(j.responseDetails || 'quota');
+      return decodeEntities(j.responseData.translatedText);
+  } },
+];
+const health = PROVIDERS.map(() => ({ until: 0, fails: 0 }));
+let lastProvider = '';
+
+async function translate(text) {
+  const tl = settings.tgt;
+  const now = Date.now();
+  // healthy providers first, in priority order; if all are cooling down, try them anyway
+  let order = PROVIDERS.map((_, i) => i).filter((i) => health[i].until <= now);
+  if (!order.length) order = PROVIDERS.map((_, i) => i).sort((a, b) => health[a].until - health[b].until);
+  for (const i of order) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    try {
+      const out = await PROVIDERS[i].run(text, 'es', tl, ctrl.signal);
+      clearTimeout(timer);
+      if (typeof out !== 'string' || !out.trim()) throw new Error('empty');
+      health[i].fails = 0; health[i].until = 0;
+      lastProvider = PROVIDERS[i].name;
+      return out.trim();
+    } catch (e) {
+      clearTimeout(timer);
+      const h = health[i];
+      h.fails++;
+      h.until = Date.now() + Math.min(600000, 20000 * 2 ** (h.fails - 1));
+    }
+  }
+  throw new Error('All translators failed');
+}
+
+/* ================= session model ================= */
+let session = null;        // { id, start, end, src, tgt, lines: [{t, es, en}] }
+let saveTimer = 0;
+
+function newSession() {
+  session = { id: 's' + Date.now(), start: Date.now(), end: Date.now(), src: settings.src, tgt: settings.tgt, lines: [] };
+}
+function persistSession(now = false) {
+  clearTimeout(saveTimer);
+  const write = () => {
+    if (!session || !session.lines.length) return;
+    session.end = Date.now();
+    const index = LS.get('index', []);
+    const meta = { id: session.id, start: session.start, end: session.end, tgt: session.tgt, n: session.lines.length,
+      preview: (session.lines[0].en || session.lines[0].es || '').slice(0, 90) };
+    const i = index.findIndex((x) => x.id === session.id);
+    if (i >= 0) index[i] = Object.assign(index[i], meta); else index.unshift(meta);
+    if (!LS.set('s.' + session.id, session.lines) || !LS.set('index', index)) toast('Storage full, so this session is no longer being saved. Export an old one and delete it.');
+  };
+  if (now) write(); else saveTimer = setTimeout(write, 400);
+}
+
+/* ================= lyric view ================= */
+let follow = true;
+let programmaticScroll = false;
+let liveEl = null;
+const lineEls = [];
+
+function makeLineEl() {
+  const el = document.createElement('div');
+  el.className = 'ln';
+  el.innerHTML = '<div class="en"></div><div class="es"></div>';
+  return el;
+}
+function ensureLive() {
+  if (liveEl) return liveEl;
+  liveEl = makeLineEl();
+  liveEl.classList.add('live', 'empty');
+  stage.appendChild(liveEl);
+  return liveEl;
+}
+function refreshEmphasis() {
+  const liveHas = liveEl && !liveEl.classList.contains('empty');
+  const active = liveHas ? liveEl : lineEls[lineEls.length - 1];
+  for (const el of stage.children) el.classList.remove('active', 'near');
+  if (!active) return;
+  active.classList.add('active');
+  const prev = active === liveEl ? lineEls[lineEls.length - 1] : lineEls[lineEls.length - 2];
+  if (prev) prev.classList.add('near');
+}
+function scrollToActive(smooth = true) {
+  if (!follow) return;
+  const el = stage.querySelector('.ln.active');
+  if (!el) return;
+  const target = el.offsetTop + el.offsetHeight - stage.clientHeight * 0.58;
+  programmaticScroll = true;
+  stage.scrollTo({ top: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
+  clearTimeout(scrollToActive.t);
+  scrollToActive.t = setTimeout(() => { programmaticScroll = false; }, 600);
+}
+function render() {
+  hero.hidden = lineEls.length > 0 || (liveEl && !liveEl.classList.contains('empty'));
+  refreshEmphasis();
+  requestAnimationFrame(() => scrollToActive());
+}
+
+function setFollow(on) {
+  follow = on;
+  livePill.hidden = on || !lineEls.length;
+  document.body.classList.toggle('browsing', !on);
+  if (on) scrollToActive();
+}
+const userScrolled = () => { if (follow) setFollow(false); };
+stage.addEventListener('touchmove', userScrolled, { passive: true });
+stage.addEventListener('wheel', userScrolled, { passive: true });
+stage.addEventListener('scroll', () => {
+  if (programmaticScroll || follow) return;
+  const active = stage.querySelector('.ln.active');
+  if (!active) return;
+  const target = active.offsetTop + active.offsetHeight - stage.clientHeight * 0.58;
+  if (stage.scrollTop >= target - 30) setFollow(true);
+}, { passive: true });
+livePill.addEventListener('click', () => setFollow(true));
+
+/* ================= translation queue for committed lines ================= */
+async function translateLine(line, el, attempt = 0) {
+  try {
+    const en = await translate(line.es);
+    line.en = en;
+    el.querySelector('.en').textContent = en;
+    el.classList.remove('pending', 'failed');
+    persistSession();
+    if (follow) requestAnimationFrame(() => scrollToActive());
+  } catch {
+    el.classList.remove('pending');
+    el.classList.add('failed');
+    if (!line.en) el.querySelector('.en').textContent = line.es;
+    if (attempt < 6) setTimeout(() => translateLine(line, el, attempt + 1), 4000 * (attempt + 1));
+  }
+}
+
+function commitLine(es) {
+  es = es.trim();
+  if (!es || !session) return;
+  const line = { t: Date.now(), es, en: '' };
+  session.lines.push(line);
+  // promote the live element so the text doesn't jump
+  const el = ensureLive();
+  el.classList.remove('live', 'empty');
+  el.querySelector('.es').textContent = es;
+  const shown = el.querySelector('.en').textContent;
+  if (shown) el.classList.add('pending'); // provisional live translation stays until the final one lands
+  lineEls.push(el);
+  liveEl = null;
+  ensureLive();
+  translateLine(line, el);
+  persistSession();
+  render();
+}
+
+/* live (interim) line: translate at most every ~900ms */
+let liveText = '', liveSeq = 0, liveBusy = false, liveTimer = 0, liveTranslatedFor = '';
+function setLive(text) {
+  liveText = text.trim();
+  const el = ensureLive();
+  el.classList.toggle('empty', !liveText);
+  el.querySelector('.es').textContent = liveText;
+  if (!liveText) { el.querySelector('.en').textContent = ''; liveTranslatedFor = ''; }
+  scheduleLiveTranslate();
+  render();
+}
+function scheduleLiveTranslate() {
+  if (liveTimer || liveBusy) return;
+  liveTimer = setTimeout(runLiveTranslate, 700);
+}
+async function runLiveTranslate() {
+  liveTimer = 0;
+  const text = liveText;
+  if (!text || text === liveTranslatedFor) return;
+  liveBusy = true;
+  const seq = ++liveSeq;
+  const el = liveEl;
+  try {
+    const en = await translate(text);
+    if (seq === liveSeq && el === liveEl) {
+      el.querySelector('.en').textContent = en;
+      liveTranslatedFor = text;
+      render();
+    }
+  } catch {}
+  liveBusy = false;
+  if (liveText && liveText !== liveTranslatedFor) scheduleLiveTranslate();
+}
+
+/* ================= speech recognition (robust for iOS Safari) ================= */
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const MAX_WORDS = 22;      // force a line break on long unbroken speech
+const PAUSE_MS = 1100;     // silence that ends a line
+const WATCHDOG_MS = 9000;  // no events for this long → recreate recognizer
+
+let running = false;
+let rec = null;
+let words = [];            // words heard by the current recognizer instance
+let committed = 0;         // how many of `words` are already committed as lines
+let committedText = '';    // committed text for this instance (to catch iOS duplicate replays)
+let pauseTimer = 0, watchdog = 0, restartTimer = 0, restartFails = 0;
+
+const norm = (s) => s.replace(/\s+/g, ' ').trim();
+
+function createRecognizer() {
+  const r = new SR();
+  r.lang = settings.src;
+  r.continuous = true;
+  r.interimResults = true;
+  r.maxAlternatives = 1;
+  r.onresult = (e) => { if (r === rec) onResult(e); };
+  r.onerror = (e) => { if (r === rec) onError(e); };
+  r.onend = () => { if (r === rec) onEnd(); };
+  r.onstart = () => { if (r === rec) { restartFails = 0; setStatus('listening'); } };
+  return r;
+}
+
+function startRecognizer() {
+  clearTimeout(restartTimer);
+  if (!running) return;
+  words = []; committed = 0; committedText = '';
+  rec = createRecognizer();
+  try { rec.start(); }
+  catch { scheduleRestart(400); return; }
+  armWatchdog();
+}
+function stopRecognizer() {
+  const r = rec; rec = null;
+  clearTimeout(pauseTimer); clearTimeout(watchdog); clearTimeout(restartTimer);
+  if (r) { try { r.abort(); } catch {} }
+}
+function scheduleRestart(ms) {
+  clearTimeout(restartTimer);
+  if (!running) return;
+  setStatus('reconnecting');
+  restartTimer = setTimeout(() => { stopRecognizer(); startRecognizer(); }, ms);
+}
+function armWatchdog() {
+  clearTimeout(watchdog);
+  watchdog = setTimeout(() => {
+    if (!running) return;
+    flushTail();
+    stopRecognizer(); startRecognizer();
+  }, WATCHDOG_MS);
+}
+
+function onResult(e) {
+  armWatchdog();
+  setStatus('listening');
+  // rebuild this instance's full transcript, skipping parts iOS sometimes replays
+  let text = '';
+  let lastFinal = false;
+  for (let i = 0; i < e.results.length; i++) {
+    const part = norm(e.results[i][0].transcript);
+    if (!part) continue;
+    if (text && (text.endsWith(part) || text === part)) continue;
+    text += (text ? ' ' : '') + part;
+    lastFinal = e.results[i].isFinal;
+  }
+  words = text ? text.split(' ') : [];
+  if (committed > words.length) committed = words.length;
+  let tail = words.slice(committed);
+
+  // iOS bug: the whole transcript can be replayed after speech stops
+  const tailText = tail.join(' ');
+  if (tail.length >= 4 && committedText.includes(tailText)) {
+    committed = words.length; setLive('');
+    stopRecognizer(); startRecognizer();
+    return;
+  }
+
+  // break long runs at punctuation where possible
+  while (tail.length > MAX_WORDS) {
+    let cut = -1;
+    for (let k = Math.min(tail.length - 4, MAX_WORDS); k >= 7; k--) {
+      if (/[.?!;:,]$/.test(tail[k - 1])) { cut = k; break; }
+    }
+    if (cut < 0) cut = 16;
+    commit(tail.slice(0, cut));
+    tail = words.slice(committed);
+  }
+
+  if (lastFinal && tail.length) { commit(tail); tail = []; }
+  setLive(tail.join(' '));
+
+  clearTimeout(pauseTimer);
+  if (tail.length) pauseTimer = setTimeout(flushTail, PAUSE_MS);
+}
+function commit(ws) {
+  committed += ws.length;
+  const s = ws.join(' ');
+  committedText += ' ' + s;
+  commitLine(s);
+}
+function flushTail() {
+  clearTimeout(pauseTimer);
+  const tail = words.slice(committed);
+  if (tail.length) commit(tail);
+  setLive('');
+  // keep each recognizer instance short-lived: iOS gets flaky with long sessions
+  if (running && committed > 120) { stopRecognizer(); startRecognizer(); }
+}
+function onError(e) {
+  if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+    stopListening();
+    toast(e.error === 'service-not-allowed'
+      ? 'Speech recognition is blocked. Enable Dictation in Settings → General → Keyboard, then try again.'
+      : 'Microphone access was denied. Allow it for this site and try again.', 6000);
+    return;
+  }
+  if (e.error === 'aborted') return;
+  restartFails++;
+  scheduleRestart(e.error === 'network' ? Math.min(5000, 500 * restartFails) : 250);
+}
+function onEnd() {
+  if (!running) return;
+  flushTail();
+  scheduleRestart(restartFails > 3 ? 1500 : 100);
+}
+
+/* ================= start / stop ================= */
+let wakeLock = null, clockTimer = 0, startedAt = 0, elapsedBefore = 0;
+async function lockScreen() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && running) { lockScreen(); if (!rec) startRecognizer(); }
+});
+
+function setStatus(kind) {
+  top.classList.toggle('listening', kind === 'listening');
+  top.classList.toggle('reconnecting', kind === 'reconnecting');
+  tickClock();
+}
+function tickClock() {
+  const ms = elapsedBefore + (running ? Date.now() - startedAt : 0);
+  const m = Math.floor(ms / 60000), s = Math.floor(ms / 1000) % 60;
+  const t = `${m}:${String(s).padStart(2, '0')}`;
+  statusText.textContent = running ? t : (session && session.lines.length ? 'Paused · ' + t : 'Ready');
+}
+
+function startListening() {
+  if (!SR) { $('unsupported').hidden = false; toast('Speech recognition isn\'t available in this browser.'); return; }
+  if (!session) newSession();
+  running = true;
+  startedAt = Date.now();
+  restartFails = 0;
+  startRecognizer();
+  lockScreen();
+  clockTimer = setInterval(tickClock, 1000);
+  btnMain.classList.add('on');
+  btnMain.querySelector('span').textContent = 'Pause';
+  btnEnd.hidden = false;
+  setStatus('listening');
+  render();
+}
+function stopListening() {
+  if (running) elapsedBefore += Date.now() - startedAt;
+  running = false;
+  flushTail();
+  stopRecognizer();
+  clearInterval(clockTimer);
+  try { wakeLock && wakeLock.release(); } catch {}
+  wakeLock = null;
+  btnMain.classList.remove('on');
+  btnMain.querySelector('span').textContent = session && session.lines.length ? 'Resume' : 'Start';
+  btnEnd.hidden = !(session && session.lines.length);
+  setStatus('idle');
+  persistSession();
+}
+function endSession() {
+  stopListening();
+  persistSession();
+  const had = session && session.lines.length;
+  session = null; elapsedBefore = 0;
+  stage.innerHTML = ''; lineEls.length = 0; liveEl = null;
+  btnMain.querySelector('span').textContent = 'Start';
+  btnEnd.hidden = true;
+  setFollow(true);
+  tickClock();
+  render();
+  if (had) toast('Saved. Find it under ≡.');
+}
+btnMain.addEventListener('click', () => (running ? stopListening() : startListening()));
+btnEnd.addEventListener('click', endSession);
+
+/* ================= settings sheet ================= */
+function applySettings() {
+  document.documentElement.style.setProperty('--size', settings.size + 'px');
+  document.body.classList.toggle('hide-es', !settings.showEs);
+  $('optSrc').value = settings.src;
+  $('optTgt').value = settings.tgt;
+  $('optShowEs').setAttribute('aria-checked', String(settings.showEs));
+}
+$('optSrc').addEventListener('change', (e) => { settings.src = e.target.value; saveSettings(); if (running) { flushTail(); stopRecognizer(); startRecognizer(); } });
+$('optTgt').addEventListener('change', (e) => { settings.tgt = e.target.value; saveSettings(); });
+$('optShowEs').addEventListener('click', () => { settings.showEs = !settings.showEs; saveSettings(); applySettings(); scrollToActive(false); });
+$('sizeDown').addEventListener('click', () => { settings.size = Math.max(20, settings.size - 3); saveSettings(); applySettings(); scrollToActive(false); });
+$('sizeUp').addEventListener('click', () => { settings.size = Math.min(48, settings.size + 3); saveSettings(); applySettings(); scrollToActive(false); });
+$('btnTest').addEventListener('click', async () => {
+  const out = $('testOut');
+  out.textContent = 'Testing…';
+  const t0 = performance.now();
+  try {
+    const r = await translate('Buenos días a todos, hoy vamos a empezar con el segundo capítulo.');
+    out.textContent = `✓ “${r}” (${Math.round(performance.now() - t0)} ms via ${lastProvider})`;
+  } catch { out.textContent = '✗ Translation is unreachable. Check your internet connection.'; }
+  if (!SR) out.textContent += ' · ✗ Speech recognition not supported in this browser.';
+});
+$('btnSettings').addEventListener('click', () => { $('settingsSheet').hidden = false; });
+
+/* ================= sessions sheet ================= */
+const fmtDate = (t) => new Date(t).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+const fmtTime = (t) => new Date(t).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const mins = (a, b) => Math.max(1, Math.round((b - a) / 60000));
+
+function toMarkdown(meta, lines) {
+  const title = meta.title || `Class · ${fmtDate(meta.start)}`;
+  let md = `# ${title}\n\n${fmtDate(meta.start)} · ${mins(meta.start, meta.end)} min · ${lines.length} lines\n\n`;
+  md += `## Translation\n\n${lines.map((l) => l.en || `[untranslated] ${l.es}`).join(' ')}\n\n`;
+  md += `## Original (Spanish)\n\n${lines.map((l) => l.es).join(' ')}\n\n`;
+  md += `## Line by line\n\n`;
+  for (const l of lines) md += `**${fmtTime(l.t)}** ${l.en || ''}\n> ${l.es}\n\n`;
+  return md;
+}
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function showSessionList() {
+  persistSession();
+  const index = LS.get('index', []);
+  $('sessTitle').textContent = 'Sessions';
+  $('sessBack').hidden = true;
+  const body = $('sessBody');
+  if (!index.length) { body.innerHTML = '<p class="empty-note">No saved sessions yet. Everything you transcribe is saved here automatically.</p>'; return; }
+  body.innerHTML = index.map((m) => `
+    <button class="sess" data-id="${m.id}">
+      <b>${esc(m.title || fmtDate(m.start))}</b>
+      <span>${m.title ? esc(fmtDate(m.start)) + ' · ' : ''}${mins(m.start, m.end)} min · ${m.n} lines${session && session.id === m.id ? ' · current' : ''}</span>
+      <p>${esc(m.preview || '')}</p>
+    </button>`).join('');
+  body.querySelectorAll('.sess').forEach((b) => b.addEventListener('click', () => showSession(b.dataset.id)));
+}
+function showSession(id) {
+  const index = LS.get('index', []);
+  const meta = index.find((m) => m.id === id);
+  const lines = (session && session.id === id) ? session.lines : LS.get('s.' + id, []);
+  if (!meta) return showSessionList();
+  $('sessTitle').textContent = meta.title || fmtDate(meta.start);
+  $('sessBack').hidden = false;
+  const body = $('sessBody');
+  body.innerHTML = `
+    <div class="actions">
+      <button class="btn-sm" data-a="share">Share</button>
+      <button class="btn-sm" data-a="copy">Copy</button>
+      <button class="btn-sm" data-a="download">Download .md</button>
+      <button class="btn-sm" data-a="rename">Rename</button>
+      <button class="btn-sm danger" data-a="delete">Delete</button>
+    </div>
+    ${lines.map((l) => `<div class="tr"><time>${fmtTime(l.t)}</time><div class="en">${esc(l.en || '…')}</div><div class="es">${esc(l.es)}</div></div>`).join('')}`;
+  const md = () => toMarkdown(meta, lines);
+  const fname = () => `subaqueo-${new Date(meta.start).toISOString().slice(0, 16).replace(/[T:]/g, '-')}.md`;
+  body.querySelector('[data-a=share]').onclick = async () => {
+    const text = md();
+    try {
+      const file = new File([text], fname(), { type: 'text/markdown' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) await navigator.share({ files: [file], title: meta.title || 'Class notes' });
+      else if (navigator.share) await navigator.share({ title: meta.title || 'Class notes', text });
+      else { await navigator.clipboard.writeText(text); toast('Copied to clipboard'); }
+    } catch (e) { if (e && e.name !== 'AbortError') toast('Couldn\'t share. Try Copy.'); }
+  };
+  body.querySelector('[data-a=copy]').onclick = async () => {
+    try { await navigator.clipboard.writeText(md()); toast('Copied to clipboard'); } catch { toast('Copy failed'); }
+  };
+  body.querySelector('[data-a=download]').onclick = () => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([md()], { type: 'text/markdown' }));
+    a.download = fname();
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  };
+  body.querySelector('[data-a=rename]').onclick = () => {
+    const name = prompt('Session name', meta.title || '');
+    if (name == null) return;
+    meta.title = name.trim();
+    LS.set('index', index);
+    showSession(id);
+  };
+  const del = body.querySelector('[data-a=delete]');
+  del.onclick = () => {
+    if (del.dataset.armed) {
+      LS.set('index', index.filter((m) => m.id !== id));
+      LS.del('s.' + id);
+      if (session && session.id === id) { stopListening(); session = null; endSession(); }
+      showSessionList();
+    } else { del.dataset.armed = '1'; del.textContent = 'Tap again to delete'; }
+  };
+}
+$('sessBack').addEventListener('click', showSessionList);
+$('btnSessions').addEventListener('click', () => { showSessionList(); $('sessionsSheet').hidden = false; });
+
+document.querySelectorAll('.sheet-wrap').forEach((w) => {
+  w.addEventListener('click', (e) => { if (e.target === w || e.target.hasAttribute('data-close')) w.hidden = true; });
+});
+
+/* ================= boot ================= */
+applySettings();
+if (!SR) $('unsupported').hidden = false;
+window.addEventListener('pagehide', () => persistSession(true));
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistSession(true); });
+tickClock();
+})();
+</script>
+</body>
+</html>
