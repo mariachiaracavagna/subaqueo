@@ -21,7 +21,10 @@ There is no test suite. To check the logic headlessly, drive the page with puppe
 **Speech pipeline**: this is the fragile part. iOS Safari's `webkitSpeechRecognition` often never sets `isFinal`, can replay the whole transcript after speech stops, and silently hangs. For that reason the code doesn't rely on final results:
 - On each result it rebuilds the current recognizer instance's full transcript as a list of words and tracks a `committed` word offset. The uncommitted tail is the live line.
 - A tail becomes a committed line when there's a `PAUSE_MS` silence, a final result arrives, or it passes `MAX_WORDS`. In the last case it splits at punctuation where possible.
-- It creates a fresh recognizer instance (never reuses one) on `onend`, on errors, from a `WATCHDOG_MS` watchdog, after roughly 120 committed words, and when a replay duplicate is detected. Handlers ignore events from stale instances (`r === rec`).
+- It creates a fresh recognizer instance (never reuses one) on `onend` and on errors. Handlers ignore events from stale instances (`r === rec`).
+- Planned restarts (after about 120 words, or from the `STALL_MS` watchdog) go through `recycle()`, which calls `stop()` so the recognizer still delivers pending results. `killRecognizer()` (`abort()`) is only for user stop and replay duplicates. Recognizers can take many seconds to return words, so an aggressive watchdog or `abort()` silently loses speech. That was the "detects almost nothing" bug.
+- If continuous mode ends twice with sound but no words, `mode` switches to `'phrase'` (`continuous = false`, a new recognizer per utterance).
+- Settings → Show diagnostics displays a live event log (`log()`), which is the main way to debug on a real phone.
 
 **Translation**: `translate()` works through a chain of free, keyless, CORS-enabled endpoints, in order: Google translate-pa (Chrome's endpoint), Google clients5, Google translate.googleapis `dict-chrome-ex`, and MyMemory. It uses a 5s timeout and gives each failing provider an exponential cooldown. `client=gtx` is intentionally left out because it rate-limits quickly. Committed lines retry with backoff. The live line is re-translated at most about every 700ms, and a sequence number drops stale responses.
 
