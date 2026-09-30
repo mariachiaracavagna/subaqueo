@@ -103,6 +103,9 @@
   .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 0; border-bottom: 1px solid var(--line); }
   .row label { font-weight: 600; }
   .row small { display: block; color: var(--sub); font-weight: 400; font-size: 13px; }
+  input.key { font: inherit; font-size: 15px; color: var(--fg); background: var(--panel-2); border: 0; border-radius: 10px; padding: 9px 10px; width: 100%; margin-top: 8px; }
+  .row.stack { display: block; }
+  .row.stack small a { color: var(--accent); }
   select, .seg button { font: inherit; color: var(--fg); background: var(--panel-2); border: 0; border-radius: 10px; padding: 8px 10px; }
   .seg { display: flex; gap: 6px; }
   .seg button { min-width: 42px; font-weight: 700; }
@@ -169,7 +172,13 @@
 <div class="sheet-wrap" id="settingsSheet" hidden>
   <div class="sheet">
     <div class="sheet-head"><h2>Settings</h2><span class="spacer"></span><button class="btn-sm" data-close>Done</button></div>
-    <div class="row"><label>Speaker's Spanish</label>
+    <div class="row"><label>Speech engine<small>Groq is steadier for long classes</small></label>
+      <select id="optEngine">
+        <option value="groq">Groq Whisper</option><option value="web">Built-in (Safari)</option>
+      </select></div>
+    <div class="row stack" id="rowKey"><label for="optKey">Groq API key<small>Kept on this phone only. Get a free key at <a href="https://console.groq.com/keys" target="_blank" rel="noopener">console.groq.com/keys</a></small></label>
+      <input class="key" id="optKey" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="gsk_…"></div>
+    <div class="row" id="rowSrc"><label>Speaker's Spanish</label>
       <select id="optSrc">
         <option value="es-ES">Spain</option><option value="es-MX">Mexico</option><option value="es-US">US</option>
         <option value="es-AR">Argentina</option><option value="es-CO">Colombia</option><option value="es-CL">Chile</option>
@@ -182,10 +191,11 @@
     <div class="row"><label>Show Spanish under each line</label><button class="switch" id="optShowEs" role="switch" aria-checked="true"></button></div>
     <div class="row"><label>Text size</label><div class="seg"><button id="sizeDown">A−</button><button id="sizeUp">A+</button></div></div>
     <div class="row"><label>Show diagnostics<small>Live log of what the microphone is doing</small></label><button class="switch" id="optDiag" role="switch" aria-checked="false"></button></div>
-    <div class="row"><label>Test translation<small>Check your connection before class</small></label><button class="btn-sm" id="btnTest">Run test</button></div>
+    <div class="row"><label>Run a test<small>Checks the speech engine and translation before class</small></label><button class="btn-sm" id="btnTest">Run test</button></div>
     <div class="test-out" id="testOut"></div>
     <ul class="tips">
       <li>Keep this page open in <b>Safari</b> and the screen on. Locking the phone stops the microphone.</li>
+      <li>With Groq, lines appear every 6 to 12 seconds, a sentence or two at a time. An hour of class uses about half of the free hourly allowance.</li>
       <li>Set <b>Settings → Display → Auto-Lock → Never</b> during class, as a backup.</li>
       <li>To stop Safari asking for the microphone every time: <b>aA</b> in the address bar → Website Settings → Microphone → Allow.</li>
       <li>Every line is saved as you go. Find past classes under the ≡ menu.</li>
@@ -212,7 +222,7 @@ const LS = {
   del(k) { try { localStorage.removeItem('subaqueo.' + k); } catch {} },
 };
 
-const settings = Object.assign({ src: 'es-ES', tgt: 'en', showEs: true, size: 30, diag: false }, LS.get('settings', {}));
+const settings = Object.assign({ src: 'es-ES', tgt: 'en', showEs: true, size: 30, diag: false, engine: 'groq', groqKey: '' }, LS.get('settings', {}));
 const saveSettings = () => LS.set('settings', settings);
 
 /* ================= dom ================= */
@@ -450,6 +460,8 @@ const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const MAX_WORDS = 22;      // force a line break on long unbroken speech
 const PAUSE_MS = 1100;     // silence that ends a line
 const STALL_MS = 25000;    // no recognizer events at all for this long → it's hung
+const NO_WORDS_MS = 8000;  // sound is going on but no words for this long → it's hung (the usual iOS failure)
+const RESTART_GAP_MS = 400; // iOS needs a moment between abort() and a new start()
 
 let running = false;
 let rec = null;
@@ -459,6 +471,7 @@ let committed = 0;         // how many of `words` are already committed as lines
 let committedText = '';    // committed text for this instance (to catch iOS duplicate replays)
 let heardSpeech = false, gotResult = false, bornAt = 0, silentRuns = 0;
 let pauseTimer = 0, watchdog = 0, restartTimer = 0, stopFallback = 0, restartFails = 0;
+let soundOn = false, lastWordsAt = 0, hangCheck = 0;
 
 const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
@@ -484,9 +497,10 @@ function createRecognizer() {
   for (const ev of ['audiostart', 'soundstart', 'speechstart', 'speechend', 'soundend']) {
     r.addEventListener(ev, () => {
       if (r !== rec) return;
-      if (ev === 'soundstart' || ev === 'speechstart') heardSpeech = true;
+      if (ev === 'soundstart' || ev === 'speechstart') { heardSpeech = true; if (!soundOn) lastWordsAt = Math.max(lastWordsAt, Date.now() - NO_WORDS_MS / 2); soundOn = true; }
+      if (ev === 'soundend' || ev === 'speechend') soundOn = false;
       log(ev);
-      armWatchdog();
+      if (ev === 'audiostart') armWatchdog(); // sound events must not keep a hung recognizer alive
     });
   }
   return r;
@@ -497,6 +511,12 @@ function startRecognizer() {
   if (!running) return;
   words = []; committed = 0; committedText = '';
   heardSpeech = false; gotResult = false; bornAt = Date.now();
+  soundOn = false; lastWordsAt = Date.now();
+  clearInterval(hangCheck);
+  hangCheck = setInterval(() => {
+    if (!running || !rec || !soundOn) return;
+    if (Date.now() - lastWordsAt > NO_WORDS_MS) { log('hung: sound but no words, recycling'); lastWordsAt = Date.now(); flushTail(); recycle(); }
+  }, 1000);
   rec = createRecognizer();
   try { rec.start(); }
   catch (e) { log('start failed: ' + e.message); rec = null; scheduleRestart(500); return; }
@@ -506,6 +526,7 @@ function startRecognizer() {
 function killRecognizer() {
   const r = rec; rec = null;
   clearTimeout(pauseTimer); clearTimeout(watchdog); clearTimeout(restartTimer); clearTimeout(stopFallback);
+  clearInterval(hangCheck);
   if (r) { try { r.abort(); } catch {} }
 }
 // graceful: stop() lets the recognizer deliver pending results, then onEnd starts a fresh one
@@ -514,7 +535,7 @@ function recycle() {
   clearTimeout(watchdog);
   try { rec.stop(); } catch {}
   clearTimeout(stopFallback);
-  stopFallback = setTimeout(() => { if (!running) return; flushTail(); killRecognizer(); startRecognizer(); }, 3000);
+  stopFallback = setTimeout(() => { if (!running) return; flushTail(); killRecognizer(); scheduleRestart(RESTART_GAP_MS); }, 3000);
 }
 function scheduleRestart(ms) {
   clearTimeout(restartTimer);
@@ -534,7 +555,7 @@ function armWatchdog() {
 
 function onResult(e) {
   armWatchdog();
-  gotResult = true; silentRuns = 0;
+  gotResult = true; silentRuns = 0; lastWordsAt = Date.now();
   setStatus('listening');
   // rebuild this instance's full transcript, skipping parts iOS sometimes replays
   let text = '';
@@ -556,7 +577,7 @@ function onResult(e) {
   if (tail.length >= 4 && committedText.includes(tailText)) {
     log('replay detected, restarting');
     committed = words.length; setLive('');
-    killRecognizer(); startRecognizer();
+    killRecognizer(); scheduleRestart(RESTART_GAP_MS);
     return;
   }
 
@@ -614,7 +635,261 @@ function onEnd() {
   if (mode === 'continuous' && !gotResult && (heardSpeech || Date.now() - bornAt > 15000)) {
     if (++silentRuns >= 2) { mode = 'phrase'; log('no words in continuous mode → switching to phrase mode'); }
   }
-  scheduleRestart(restartFails > 3 ? 1500 : 50);
+  scheduleRestart(restartFails > 3 ? 1500 : RESTART_GAP_MS);
+}
+
+/* ================= Groq Whisper engine (chunked recording) =================
+   Records the mic in 6 to 12 second chunks, cutting at a pause where it can so
+   words aren't split. Each chunk is a complete audio file sent to Groq's
+   Whisper. Results can come back out of order, so they are committed in order.
+   Free tier: 20 requests/min, 7,200 audio seconds/hour. Chunks of 6 s or more
+   keep us under 10 requests/min, and silent chunks are never sent. */
+const GROQ_URL = 'https://api.groq.com/openai/v1/audio/transcriptions';
+const GROQ_MODEL = 'whisper-large-v3-turbo';
+const CHUNK_MIN_MS = 6000;     // Groq bills at least 10 s per request, so don't go much shorter
+const CHUNK_MAX_MS = 12000;    // force a cut on unbroken speech
+const CUT_SILENCE_MS = 350;    // a pause this long after CHUNK_MIN_MS ends the chunk
+const MIN_SPEECH_TICKS = 3;    // 100 ms meter ticks with speech needed before a chunk is worth sending
+// phrases Whisper tends to invent on silence or noise
+const HALLUCINATIONS = [/amara\.org/i, /subt[ií]tulos (realizados|por|de la comunidad)/i, /gracias por ver/i, /suscr[ií]bete/i, /^[¡!\s]*gracias[.!\s]*$/i];
+
+let g = null;                  // current capture: { ctx, stream, analyser, buf, meter, rec, cur, seq, next, results, inflight, noise, prompt, lastText }
+const useGroq = () => settings.engine === 'groq';
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function pickMime() {
+  if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+  for (const m of ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus']) if (MediaRecorder.isTypeSupported(m)) return m;
+  return '';
+}
+const groqSupported = () => !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+
+// must be called straight from a tap, so iOS lets the AudioContext run
+function groqStart() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = AC ? new AC() : null;
+  if (ctx) ctx.resume().catch(() => {});
+  const me = { ctx, stream: null, analyser: null, buf: null, meter: 0, rec: null, cur: null,
+    seq: 0, next: 0, results: new Map(), inflight: 0, noise: 0.01, prompt: '', lastText: '' };
+  g = me;
+  navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: true, autoGainControl: true } })
+    .then((stream) => {
+      if (g !== me || !running) { stream.getTracks().forEach((t) => t.stop()); return; }
+      me.stream = stream;
+      if (ctx) {
+        me.analyser = ctx.createAnalyser();
+        me.analyser.fftSize = 2048;
+        ctx.createMediaStreamSource(stream).connect(me.analyser);
+        me.buf = new Float32Array(me.analyser.fftSize);
+      }
+      stream.getAudioTracks().forEach((t) => t.addEventListener('ended', () => {
+        if (g === me && running) { log('mic track ended'); restartCapture(); }
+      }));
+      me.meter = setInterval(() => meterTick(me), 100);
+      beginChunk(me);
+      log('groq: mic open (' + (pickMime() || 'default format') + ')');
+      setStatus('listening');
+    })
+    .catch((e) => {
+      if (g !== me) return;
+      log('mic error: ' + e.name);
+      stopListening();
+      toast(e.name === 'NotAllowedError' ? 'Microphone access was denied. Allow it for this site and try again.' : 'Couldn\'t open the microphone.', 6000);
+    });
+}
+
+function groqStop() {
+  const me = g;
+  if (!me) return;
+  g = null;
+  clearInterval(me.meter);
+  const close = () => {
+    if (me.stream) me.stream.getTracks().forEach((t) => t.stop());
+    if (me.ctx) me.ctx.close().catch(() => {});
+  };
+  const last = me.rec;
+  me.rec = null;
+  if (last && last.state !== 'inactive') {
+    last.addEventListener('stop', close);
+    try { last.stop(); } catch { close(); }  // the last chunk still gets transcribed
+  } else close();
+  showWaiting(false);
+}
+
+function restartCapture() {
+  groqStop();
+  if (running) groqStart();
+}
+
+function meterTick(me) {
+  if (!me.rec || !me.cur) return;
+  const now = Date.now();
+  let speaking;
+  if (me.analyser && me.ctx.state === 'running') {
+    me.analyser.getFloatTimeDomainData(me.buf);
+    let sum = 0;
+    for (let i = 0; i < me.buf.length; i++) sum += me.buf[i] * me.buf[i];
+    const rms = Math.sqrt(sum / me.buf.length);
+    // noise floor: follows quiet moments fast, loud ones slowly
+    me.noise = rms < me.noise ? me.noise * 0.7 + rms * 0.3 : me.noise * 0.998 + rms * 0.002;
+    speaking = rms > Math.max(0.004, me.noise * 2.5);
+  } else {
+    // no level meter (AudioContext blocked): send every chunk and cut on time only
+    if (me.ctx && me.ctx.state === 'suspended') me.ctx.resume().catch(() => {});
+    speaking = true;
+  }
+  if (speaking) { me.cur.spoke++; me.cur.silentSince = 0; }
+  else if (!me.cur.silentSince) me.cur.silentSince = now;
+  if (me.cur.spoke === MIN_SPEECH_TICKS) updateWaiting(me);
+
+  const age = now - me.cur.start;
+  const paused = me.cur.silentSince && now - me.cur.silentSince >= CUT_SILENCE_MS;
+  if (age >= CHUNK_MAX_MS || (age >= CHUNK_MIN_MS && paused)) cutChunk(me);
+}
+
+function beginChunk(me) {
+  const mime = pickMime();
+  let rec;
+  try { rec = mime ? new MediaRecorder(me.stream, { mimeType: mime }) : new MediaRecorder(me.stream); }
+  catch (e) { log('recorder error: ' + e.message); return; }
+  const info = { id: me.seq++, start: Date.now(), spoke: 0, silentSince: 0 };
+  const parts = [];
+  rec.ondataavailable = (e) => { if (e.data && e.data.size) parts.push(e.data); };
+  rec.onstop = () => handleChunk(me, info, new Blob(parts, { type: rec.mimeType || mime || 'audio/webm' }));
+  rec.onerror = (e) => log('recorder error: ' + ((e.error && e.error.name) || 'unknown'));
+  try { rec.start(); } catch (e) { log('recorder start failed: ' + e.message); me.seq--; return; }
+  me.rec = rec;
+  me.cur = info;
+}
+
+function cutChunk(me) {
+  const old = me.rec;
+  if (!old) return;
+  me.rec = null;
+  beginChunk(me);            // start the next chunk first so no audio falls in a gap
+  try { old.stop(); } catch {}
+}
+
+async function handleChunk(me, info, blob) {
+  const secs = ((Date.now() - info.start) / 1000).toFixed(1);
+  if (info.spoke < MIN_SPEECH_TICKS || blob.size < 1000) {
+    log(`#${info.id} ${secs}s: no speech, skipped`);
+    return settle(me, info.id, '');
+  }
+  log(`#${info.id} ${secs}s ${Math.round(blob.size / 1024)} kB: sending`);
+  me.inflight++;
+  updateWaiting(me);
+  let text = '', lost = true;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { text = await groqTranscribe(blob, me.prompt); lost = false; break; }
+    catch (e) {
+      log(`#${info.id}: ${e.message}`);
+      if (e.fatal) {
+        me.inflight--;
+        settle(me, info.id, '');
+        if (running) stopListening();
+        toast('Groq rejected the API key. Check it in Settings.', 6000);
+        return;
+      }
+      if (e.noRetry) break;
+      await sleep(e.retryAfter || 2000 * (attempt + 1));
+    }
+  }
+  me.inflight--;
+  if (lost) toast('A few seconds were lost because the connection dropped.');
+  settle(me, info.id, text);
+}
+
+async function groqTranscribe(blob, prompt) {
+  const ext = /mp4|m4a|aac/.test(blob.type) ? 'mp4' : /ogg/.test(blob.type) ? 'ogg' : /wav/.test(blob.type) ? 'wav' : 'webm';
+  const fd = new FormData();
+  fd.append('file', blob, 'chunk.' + ext);
+  fd.append('model', GROQ_MODEL);
+  fd.append('language', 'es');
+  fd.append('response_format', 'verbose_json');
+  fd.append('temperature', '0');
+  if (prompt) fd.append('prompt', prompt.slice(-200)); // the previous words help Whisper with names and continuity
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 20000);
+  let r;
+  try {
+    r = await fetch(GROQ_URL, { method: 'POST', headers: { Authorization: 'Bearer ' + (settings.groqKey || '').trim() }, body: fd, signal: ctrl.signal });
+  } catch (e) {
+    throw new Error(e.name === 'AbortError' ? 'timed out' : 'network error');
+  } finally { clearTimeout(timer); }
+  if (!r.ok) {
+    const err = new Error('HTTP ' + r.status);
+    if (r.status === 401 || r.status === 403) err.fatal = true;
+    else if (r.status === 400 || r.status === 413) err.noRetry = true;
+    else if (r.status === 429) { const ra = parseFloat(r.headers.get('retry-after')); err.retryAfter = (isFinite(ra) ? ra : 6) * 1000; }
+    throw err;
+  }
+  const j = await r.json();
+  // drop segments Whisper itself thinks are not speech
+  const segs = Array.isArray(j.segments) ? j.segments.filter((sg) => !(sg.no_speech_prob > 0.6 && sg.avg_logprob < -0.8)) : null;
+  const text = norm(segs ? segs.map((sg) => sg.text).join(' ') : (j.text || ''));
+  if (text && HALLUCINATIONS.some((re) => re.test(text))) { log('dropped: ' + text.slice(0, 40)); return ''; }
+  return text;
+}
+
+// commit results in recording order, whatever order they came back in
+function settle(me, id, text) {
+  me.results.set(id, text);
+  while (me.results.has(me.next)) {
+    const t = me.results.get(me.next);
+    me.results.delete(me.next);
+    me.next++;
+    if (!t || t === me.lastText) continue; // Whisper sometimes repeats the previous chunk
+    me.lastText = t;
+    for (const line of splitLines(t)) commitLine(line);
+    me.prompt = (me.prompt + ' ' + t).slice(-400);
+  }
+  updateWaiting(me);
+}
+
+// sentence-sized lines of at most MAX_WORDS words
+function splitLines(text) {
+  const out = [];
+  const sentences = text.match(/[^.?!…]+(?:[.?!…]+["»”)]*|$)/g) || [text];
+  for (const sentence of sentences) {
+    let ws = norm(sentence).split(' ').filter(Boolean);
+    while (ws.length > MAX_WORDS) {
+      let cut = -1;
+      for (let k = Math.min(ws.length - 4, MAX_WORDS); k >= 7; k--) if (/[,;:]$/.test(ws[k - 1])) { cut = k; break; }
+      if (cut < 0) cut = Math.min(16, Math.ceil(ws.length / 2));
+      out.push(ws.slice(0, cut).join(' '));
+      ws = ws.slice(cut);
+    }
+    if (!ws.length) continue;
+    const prev = out.length ? out[out.length - 1].split(' ').length : 0;
+    if (ws.length < 4 && prev && prev + ws.length <= MAX_WORDS) out[out.length - 1] += ' ' + ws.join(' ');
+    else out.push(ws.join(' '));
+  }
+  return out;
+}
+
+// a "…" line while speech is being heard or transcribed
+function updateWaiting(me) {
+  showWaiting(running && g === me && ((me.cur && me.cur.spoke >= MIN_SPEECH_TICKS) || me.inflight > 0));
+}
+function showWaiting(on) {
+  if (!useGroq()) return;
+  const el = ensureLive();
+  if (on === !el.classList.contains('empty')) return;
+  el.classList.toggle('empty', !on);
+  if (on) { el.querySelector('.es').textContent = ''; el.querySelector('.en').textContent = ''; }
+  render();
+}
+
+// a 1 s silent WAV, to check the key without using real audio
+function silentWav() {
+  const rate = 16000, n = rate, buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  str(36, 'data'); v.setUint32(40, n * 2, true);
+  return new Blob([buf], { type: 'audio/wav' });
 }
 
 /* ================= start / stop ================= */
@@ -623,7 +898,13 @@ async function lockScreen() {
   try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
 }
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && running) { lockScreen(); if (!rec) startRecognizer(); }
+  if (document.visibilityState !== 'visible' || !running) return;
+  lockScreen();
+  if (useGroq()) {
+    // iOS cuts the mic when the screen locks; reopen it if so
+    const dead = !g || !g.stream || g.stream.getAudioTracks().every((t) => t.readyState === 'ended');
+    if (dead) { log('back from background, reopening mic'); restartCapture(); }
+  } else if (!rec) startRecognizer();
 });
 
 function setStatus(kind) {
@@ -639,12 +920,20 @@ function tickClock() {
 }
 
 function startListening() {
-  if (!SR) { $('unsupported').hidden = false; toast('Speech recognition isn\'t available in this browser.'); return; }
+  if (useGroq()) {
+    if (!groqSupported()) { toast('This browser can\'t record audio. Try Safari, or switch the engine to Built-in in Settings.', 6000); return; }
+    if (!(settings.groqKey || '').trim()) {
+      toast('Paste your Groq API key in Settings first.', 4000);
+      $('settingsSheet').hidden = false;
+      $('optKey').focus();
+      return;
+    }
+  } else if (!SR) { $('unsupported').hidden = false; toast('Speech recognition isn\'t available in this browser.'); return; }
   if (!session) newSession();
   running = true;
   startedAt = Date.now();
   restartFails = 0;
-  startRecognizer();
+  if (useGroq()) groqStart(); else startRecognizer();
   lockScreen();
   clockTimer = setInterval(tickClock, 1000);
   btnMain.classList.add('on');
@@ -658,6 +947,7 @@ function stopListening() {
   running = false;
   flushTail();
   killRecognizer();
+  groqStop();
   clearInterval(clockTimer);
   try { wakeLock && wakeLock.release(); } catch {}
   wakeLock = null;
@@ -688,6 +978,11 @@ function applySettings() {
   document.documentElement.style.setProperty('--size', settings.size + 'px');
   document.body.classList.toggle('hide-es', !settings.showEs);
   $('optSrc').value = settings.src;
+  $('optEngine').value = settings.engine;
+  $('optKey').value = settings.groqKey || '';
+  $('rowKey').hidden = !useGroq();
+  $('rowSrc').hidden = useGroq(); // Whisper handles every Spanish accent itself
+  $('unsupported').hidden = useGroq() ? groqSupported() : !!SR;
   $('optTgt').value = settings.tgt;
   $('optShowEs').setAttribute('aria-checked', String(settings.showEs));
   $('optDiag').setAttribute('aria-checked', String(settings.diag));
@@ -695,6 +990,13 @@ function applySettings() {
   if (settings.diag) log('diagnostics on');
 }
 $('optSrc').addEventListener('change', (e) => { settings.src = e.target.value; saveSettings(); if (running) { flushTail(); killRecognizer(); startRecognizer(); } });
+$('optEngine').addEventListener('change', (e) => {
+  const wasRunning = running;
+  if (wasRunning) stopListening();
+  settings.engine = e.target.value; saveSettings(); applySettings();
+  if (wasRunning) startListening();
+});
+$('optKey').addEventListener('change', (e) => { settings.groqKey = e.target.value.trim(); saveSettings(); });
 $('optTgt').addEventListener('change', (e) => { settings.tgt = e.target.value; saveSettings(); });
 $('optShowEs').addEventListener('click', () => { settings.showEs = !settings.showEs; saveSettings(); applySettings(); scrollToActive(false); });
 $('optDiag').addEventListener('click', () => { settings.diag = !settings.diag; saveSettings(); applySettings(); });
@@ -703,12 +1005,22 @@ $('sizeUp').addEventListener('click', () => { settings.size = Math.min(48, setti
 $('btnTest').addEventListener('click', async () => {
   const out = $('testOut');
   out.textContent = 'Testing…';
+  let speech = '';
+  if (useGroq()) {
+    if (!(settings.groqKey || '').trim()) speech = '✗ No Groq API key yet.';
+    else {
+      try { await groqTranscribe(silentWav(), ''); speech = '✓ Groq key works.'; }
+      catch (e) { speech = e.fatal ? '✗ Groq rejected the key.' : `✗ Couldn't reach Groq (${e.message}).`; }
+    }
+    if (!groqSupported()) speech += ' ✗ This browser can\'t record audio.';
+  } else if (!SR) speech = '✗ Speech recognition not supported in this browser.';
   const t0 = performance.now();
+  let tr;
   try {
     const r = await translate('Buenos días a todos, hoy vamos a empezar con el segundo capítulo.');
-    out.textContent = `✓ “${r}” (${Math.round(performance.now() - t0)} ms via ${lastProvider})`;
-  } catch { out.textContent = '✗ Translation is unreachable. Check your internet connection.'; }
-  if (!SR) out.textContent += ' · ✗ Speech recognition not supported in this browser.';
+    tr = `✓ “${r}” (${Math.round(performance.now() - t0)} ms via ${lastProvider})`;
+  } catch { tr = '✗ Translation is unreachable. Check your internet connection.'; }
+  out.textContent = (speech ? speech + ' ' : '') + tr;
 });
 $('btnSettings').addEventListener('click', () => { $('settingsSheet').hidden = false; });
 
@@ -807,7 +1119,6 @@ document.querySelectorAll('.sheet-wrap').forEach((w) => {
 
 /* ================= boot ================= */
 applySettings();
-if (!SR) $('unsupported').hidden = false;
 window.addEventListener('pagehide', () => persistSession(true));
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') persistSession(true); });
 tickClock();
